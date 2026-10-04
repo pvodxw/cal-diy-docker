@@ -1,0 +1,85 @@
+name: Build cal.diy image
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit, tag ou branch do calcom/cal.diy"
+        required: true
+        default: "54343aa685ae8f33159d2f485ec4a57bad5c574a"
+      webapp_url:
+        description: "URL publica da instancia"
+        required: true
+        default: "https://agenda.assessoria2p.com.br"
+
+permissions:
+  contents: read
+  packages: write
+
+# Banco descartavel usado apenas durante o build (mesmos valores do workflow oficial)
+env:
+  POSTGRES_USER: "unicorn_user"
+  POSTGRES_PASSWORD: "magical_password"
+  POSTGRES_DB: "calendso"
+  DATABASE_HOST: "database:5432"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Checkout cal.diy
+        uses: actions/checkout@v4
+        with:
+          repository: calcom/cal.diy
+          ref: ${{ inputs.ref }}
+
+      - name: Short SHA
+        id: v
+        run: echo "sha=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Copy env
+        run: grep -o '^[^#]*' .env.example > .env
+
+      - name: Start database
+        run: |
+          docker compose up -d database
+          for i in $(seq 1 30); do docker exec database pg_isready -U "$POSTGRES_USER" && break; sleep 2; done
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            network=container:database
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/cal.diy:${{ steps.v.outputs.sha }}
+            ghcr.io/${{ github.repository_owner }}/cal.diy:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.v.outputs.sha }}
+          build-args: |
+            NEXT_PUBLIC_WEBAPP_URL=${{ inputs.webapp_url }}
+            NEXT_PUBLIC_LICENSE_CONSENT=agree
+            CALCOM_TELEMETRY_DISABLED=1
+            DATABASE_URL=postgresql://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@${{ env.DATABASE_HOST }}/${{ env.POSTGRES_DB }}
